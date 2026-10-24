@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sovvakt – test</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 16px; background: #111; color: #eee; }
+  h1 { font-size: 20px; margin: 0 0 8px; }
+  p { margin: 6px 0; color: #bbb; }
+  button { font: inherit; font-size: 18px; padding: 12px 16px; margin: 4px 4px 4px 0; border-radius: 8px; border: 0; }
+  #start { background: #a6248f; color: #fff; }
+  #stop { background: #444; color: #fff; }
+  #clear { background: #333; color: #ccc; font-size: 14px; padding: 8px 12px; }
+  label { display: block; margin: 8px 0; }
+  #status { font-size: 18px; margin: 10px 0; padding: 8px; background: #222; border-radius: 8px; }
+  #log { font: 13px/1.35 ui-monospace, monospace; white-space: pre-wrap; background: #1a1a1a; padding: 8px; border-radius: 8px; }
+  .warn { color: #ff9a5a; }
+</style>
+</head>
+<body>
+<h1>Sovvakt – test</h1>
+<p>Spelar ett ljud som är 70 s långt och tyst utom ett larm de sista 6 sekunderna. Medan sidan
+lever startas ljudet om innan larmet hinner komma. Fryses sidan (låst telefon, annan app,
+notis) kommer ingen omstart, och larmet hörs efter som mest 70 s.</p>
+<p>Prova: tryck Starta, lås telefonen i 2 min · byt till en annan app · tryck på en notis.
+Kom tillbaka och läs loggen.</p>
+
+<label><input type="checkbox" id="quick" checked> Snabbtest: larmet efter ~15 s i stället för ~65 s</label>
+<label><input type="checkbox" id="wake" checked> Håll skärmen tänd (Wake Lock, som Run)</label>
+<label><input type="checkbox" id="gps" checked> Följ GPS (räknar positioner, som Run)</label>
+
+<button id="start">Starta</button><button id="stop">Stoppa</button>
+<div id="status">Stoppad</div>
+<button id="clear">Rensa loggen</button>
+<div id="log"></div>
+
+<script>
+const AUDIO_LEN = 70;        // s
+const ALARM_AT = 64;         // larmet börjar här
+const RESTART_BEFORE = 54;   // vanligt läge: starta om när ljudet passerat så här långt
+const QUICK_FROM = 50;       // snabbtest: spela från 50 s (larm efter 14 s)…
+const QUICK_RESTART = 58;    // …och starta om vid 58 s
+const KEY = "sovvakt-log";
+
+const audio = new Audio("vakt.m4a");
+audio.preload = "auto";
+let running = false, timer = null, lock = null, watchId = null;
+let restarts = 0, fixes = 0, lastFixAt = 0, hiddenTicks = 0, lastTick = 0;
+
+const $ = (id) => document.getElementById(id);
+const now = () => new Date().toLocaleTimeString("sv-SE", { hour12: false });
+
+function load() { try { return JSON.parse(localStorage.getItem(KEY) || "[]"); } catch { return []; } }
+function save(lines) { try { localStorage.setItem(KEY, JSON.stringify(lines.slice(-400))); } catch {} }
+function log(text, warn) {
+  const lines = load();
+  lines.push((warn ? "! " : "  ") + now() + "  " + text);
+  save(lines);
+  render();
+}
+function render() {
+  $("log").innerHTML = load().slice().reverse()
+    .map((l) => l.startsWith("!") ? `<span class="warn">${l}</span>` : l).join("\n");
+}
+
+const quick = () => $("quick").checked;
+const from = () => (quick() ? QUICK_FROM : 0);
+const restartAt = () => (quick() ? QUICK_RESTART : RESTART_BEFORE);
+
+function play() {
+  audio.currentTime = from();
+  const p = audio.play();
+  if (p) p.catch((e) => log("play() nekades: " + e.name, true));
+}
+
+function tick() {
+  const t = Date.now();
+  // Gick det långt mellan tickarna har sidan varit frusen.
+  if (lastTick && t - lastTick > 3000) log(`sidan frusen i ${Math.round((t - lastTick) / 1000)} s`, true);
+  lastTick = t;
+  if (document.hidden) hiddenTicks++;
+  if (!running) return;
+  if (audio.currentTime >= restartAt() || audio.paused || audio.ended) {
+    if (audio.paused && !audio.ended && audio.currentTime > from() + 1) log("ljudet var pausat – startar om", true);
+    restarts++;
+    play();
+  }
+  const sinceFix = lastFixAt ? Math.round((t - lastFixAt) / 1000) : null;
+  $("status").textContent =
+    `Igång · ljud ${audio.currentTime.toFixed(0)} s · omstarter ${restarts} · ` +
+    `GPS ${fixes} pos` + (sinceFix !== null ? `, senast för ${sinceFix} s` : "") +
+    ` · skärmlås ${lock && !lock.released ? "på" : "av"}`;
+}
+
+async function takeLock() {
+  if (!$("wake").checked || !("wakeLock" in navigator) || document.hidden) return;
+  try {
+    lock = await navigator.wakeLock.request("screen");
+    lock.addEventListener("release", () => log("skärmlåset släpptes" + (document.hidden ? " (sidan dold)" : " (sidan syns!)"), !document.hidden));
+  } catch (e) { log("skärmlås nekat: " + e.name, true); }
+}
+
+$("start").onclick = async () => {
+  if (running) return;
+  running = true; restarts = 0; fixes = 0; lastFixAt = 0; hiddenTicks = 0; lastTick = Date.now();
+  log(`START (${quick() ? "snabbtest, larm efter ~14 s utan omstart" : "larm efter ~64 s utan omstart"})`);
+  play();
+  await takeLock();
+  if ($("gps").checked && "geolocation" in navigator) {
+    watchId = navigator.geolocation.watchPosition(
+      (p) => {
+        const t = Date.now();
+        if (lastFixAt && t - lastFixAt > 10000) log(`GPS tillbaka efter ${Math.round((t - lastFixAt) / 1000)} s`, true);
+        fixes++; lastFixAt = t;
+      },
+      (e) => log("GPS-fel: " + e.message, true),
+      { enableHighAccuracy: true, maximumAge: 0 },
+    );
+  }
+  timer = setInterval(tick, 1000);
+};
+
+$("stop").onclick = () => {
+  if (!running) return;
+  running = false;
+  clearInterval(timer);
+  audio.pause();
+  if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+  watchId = null;
+  if (lock) lock.release().catch(() => {});
+  log(`STOPP · ${restarts} omstarter · ${fixes} positioner`);
+  $("status").textContent = "Stoppad";
+};
+
+$("clear").onclick = () => { save([]); render(); };
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    hiddenTicks = 0;
+    log("sidan DOLD");
+  } else {
+    log(`sidan SYNS igen · ${hiddenTicks} tick medan dold · ljud vid ${audio.currentTime.toFixed(0)} s` +
+        (audio.paused ? " (pausat)" : ""), audio.currentTime >= ALARM_AT || audio.ended);
+    if (running) takeLock();
+  }
+});
+window.addEventListener("pagehide", () => log("pagehide"));
+window.addEventListener("pageshow", (e) => log("pageshow" + (e.persisted ? " (från cache)" : "")));
+
+for (const ev of ["pause", "ended", "stalled", "suspend", "waiting"]) {
+  audio.addEventListener(ev, () => { if (running) log("ljud: " + ev, ev !== "suspend"); });
+}
+audio.addEventListener("timeupdate", () => {
+  if (running && audio.currentTime >= ALARM_AT && !audio._alarmLogged) { audio._alarmLogged = true; log("LARMET SPELAS", true); }
+  if (audio.currentTime < ALARM_AT) audio._alarmLogged = false;
+});
+
+render();
+</script>
+</body>
+</html>
