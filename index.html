@@ -25,12 +25,15 @@ lever startas ljudet om innan larmet hinner komma. Fryses sidan (låst telefon, 
 notis) kommer ingen omstart, och larmet hörs efter som mest 70 s.</p>
 <p>Prova: tryck Starta, lås telefonen i 2 min · byt till en annan app · tryck på en notis.
 Kom tillbaka och läs loggen.</p>
+<p>Version 3: kryssrutan "Utan ljud". Visar loggen "0 tick medan dold" och "sidan frusen i … s"
+utan ljud, så är det ljudet som håller sidan vid liv.</p>
 <p>Version 2: koden visade sig köra även dold medan ljudet spelar, men GPS:en stannar. Därför larmar
 sidan nu direkt när GPS:en varit tyst för länge; det långa ljudet är kvar som reserv.</p>
 
 <label><input type="checkbox" id="quick" checked> Snabbtest: larmet efter ~15 s i stället för ~65 s</label>
 <label><input type="checkbox" id="wake" checked> Håll skärmen tänd (Wake Lock, som Run)</label>
 <label><input type="checkbox" id="gps" checked> Följ GPS (räknar positioner, som Run)</label>
+<label><input type="checkbox" id="mute"> Utan ljud: spela inget ljud (testar om sidan fryses när den döljs). Larmet försöker ändå spelas om koden kör.</label>
 <label><input type="checkbox" id="gpsAlarm" checked> Larma när GPS:en tystnat (20 s i snabbtest, annars 45 s)</label>
 
 <button id="start">Starta</button><button id="stop">Stoppa</button>
@@ -70,6 +73,7 @@ function render() {
 }
 
 const quick = () => $("quick").checked;
+const mute = () => $("mute").checked;
 const from = () => (quick() ? QUICK_FROM : 0);
 const restartAt = () => (quick() ? QUICK_RESTART : RESTART_BEFORE);
 
@@ -102,7 +106,16 @@ function tick() {
     }
     return;
   }
-  if (alarming) { alarming = false; log("GPS igång igen – larmet tystnar"); restarts++; play(); return; }
+  if (alarming) {
+    alarming = false;
+    log("GPS igång igen – larmet tystnar");
+    if (mute()) audio.pause(); else { restarts++; play(); }
+    return;
+  }
+  if (mute()) {
+    $("status").textContent = `Igång utan ljud · GPS ${fixes} pos · skärmlås ${lock && !lock.released ? "på" : "av"}`;
+    return;
+  }
   if (audio.currentTime >= restartAt() || audio.paused || audio.ended) {
     if (audio.paused && !audio.ended && audio.currentTime > from() + 1) log("ljudet var pausat – startar om", true);
     restarts++;
@@ -127,8 +140,12 @@ $("start").onclick = async () => {
   if (running) return;
   running = true; restarts = 0; fixes = 0; lastFixAt = 0; hiddenTicks = 0; lastTick = Date.now();
   startedAt = Date.now(); alarming = false;
-  log(`START (${quick() ? "snabbtest, larm efter ~14 s utan omstart" : "larm efter ~64 s utan omstart"})`);
-  play();
+  log(`START (${mute() ? "UTAN LJUD, " : ""}${quick() ? "snabbtest, larm efter ~14 s utan omstart" : "larm efter ~64 s utan omstart"})`);
+  if (mute()) {
+    // Lås upp ljudet i trycket, så att larmet går att spela senare, men spela inget nu.
+    audio.muted = true;
+    audio.play().then(() => { audio.pause(); audio.muted = false; }).catch(() => { audio.muted = false; });
+  } else play();
   await takeLock();
   if ($("gps").checked && "geolocation" in navigator) {
     watchId = navigator.geolocation.watchPosition(
